@@ -1,0 +1,66 @@
+.video-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  place-content: center;
+  place-items: stretch;
+}
+
+/* 1 participant: large centered tile */
+.video-grid[data-count="1"] {
+  grid-template-columns: minmax(0, min(1100px, 92%));
+  grid-template-rows: minmax(0, 80vh);
+}
+
+/* 2 participants: split evenly */
+.video-grid[data-count="2"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 80vh);
+  width: min(1400px, 96%);
+  margin: 0 auto;
+}
+
+/* 3-4 participants: 2x2 grid */
+.video-grid[data-count="3"],
+.video-grid[data-count="4"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  width: min(1400px, 96%);
+  height: 100%;
+  margin: 0 auto;
+}
+
+/* 5+ participants: responsive auto-fit grid */
+.video-grid[data-count="5"],
+.video-grid[data-count="6"],
+.video-grid[data-count="7"],
+.video-grid[data-count="8"],
+.video-grid[data-count="9"] {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-auto-rows: minmax(160px, 1fr);
+  height: 100%;
+  overflow-y: auto;
+}
+
+.video-grid__cell {
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (max-width: 720px) {
+  .video-grid[data-count="1"] {
+    grid-template-rows: minmax(0, 60vh);
+  }
+  .video-grid[data-count="2"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+  .video-grid[data-count="3"],
+  .video-grid[data-count="4"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: minmax(180px, 1fr);
+    overflow-y: auto;
+  }
+}
