@@ -1,91 +1,74 @@
 import { socket } from "./socket.js";
 import { createEmitter } from "./emitter.js";
 
-// ---------------------------------------------------------------------
-// State — same shape/names as the original client.js module-level state.
-// These remain the single source of truth for WebRTC/Socket.IO state.
-// React never mutates these directly; it only reads what's broadcast
-// through `bus` below.
-// ---------------------------------------------------------------------
-
-// map: socket.id -> username (identical role to original client.js `map`)
 export const map = new Map();
-// peerConnectionMap: socket.id -> RTCPeerConnection (identical role to original)
 export const peerConnectionMap = new Map();
-// every MediaStream this client has acquired via getUserMedia this session.
-// The original app acquired local media in more than one place (once for the
-// local preview tile in userInfoHandler.js, and again per-peer-connection in
-// mediaFunctions.js's initialise()) and wired mic/camera buttons independently
-// in each place. We keep that same "acquire per connection" behavior, but
-// track every stream centrally so a single mic/camera control can affect all
-// of them at once (see toggleMic/toggleCamera below).
+
 const localMediaStreams = [];
 
 export const bus = createEmitter();
-// Events emitted on `bus`:
-//   "local-preview" (stream)                 — the local user's own preview stream
-//   "participant-track" (id, stream)         — a remote participant's media arrived
-//   "participant-joined" (id, username)      — roster gained someone (name only, no media yet)
-//   "participant-left" (id)                  — someone disconnected
-//   "connection-state" (id, state)           — peer connection state changed, for UI status
 
 let handlersRegistered = false;
 
-// Every RTCPeerConnection created below previously had zero configuration,
-// which means ICE could only gather "host" candidates (your machine's local
-// network address). That works by accident on localhost or when both peers
-// are on the same LAN, but fails silently across real networks — neither
-// side ever gets a NAT-traversed path to the other, so no track event ever
-// fires. This is additive configuration, not a change to the signaling
-// logic itself.
-//
-// STUN alone (stun.l.google.com) only helps peers discover their own public
-// address — it doesn't help when a direct path still isn't reachable (e.g.
-// symmetric NAT, restrictive corporate firewalls). TURN relays media
-// through a third-party server in that case, at the cost of that server's
-// bandwidth.
-//
-// Defaults to the Open Relay Project's free public TURN server — fine for
-// testing and small/low-traffic use, but it's shared/rate-limited and has
-// no uptime guarantee. For production, set these three env vars to your
-// own TURN provider's credentials (Metered, Twilio, Xirsys, etc.) and they
-// override the public fallback automatically:
-//   VITE_TURN_URL, VITE_TURN_USERNAME, VITE_TURN_CREDENTIAL
+/*
+|--------------------------------------------------------------------------
+| ICE / STUN / TURN
+|--------------------------------------------------------------------------
+|
+| STUN helps peers discover their public network address.
+| TURN is required when a direct peer-to-peer connection is impossible.
+|
+| Add these to your frontend environment:
+|
+| VITE_TURN_URL=
+| VITE_TURN_USERNAME=
+| VITE_TURN_CREDENTIAL=
+|
+*/
+
 const turnUrl = import.meta.env.VITE_TURN_URL;
 const turnUsername = import.meta.env.VITE_TURN_USERNAME;
 const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
 
+const iceServers = [
+  {
+    urls: "stun:stun.l.google.com:19302",
+  },
+];
+
+if (turnUrl && turnUsername && turnCredential) {
+  iceServers.push({
+    urls: turnUrl,
+    username: turnUsername,
+    credential: turnCredential,
+  });
+}
+
 const ICE_SERVERS = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    turnUrl && turnUsername && turnCredential
-      ? { urls: turnUrl, username: turnUsername, credential: turnCredential }
-      : {
-          urls: [
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:443",
-            "turn:openrelay.metered.ca:443?transport=tcp",
-          ],
-          username: "openrelayproject",
-          credential: "openrelayproject",
-        },
-  ],
+  iceServers,
 };
 
-export const createVideoElem = () => {
-  // Preserved for parity with the original export, though React no longer
-  // needs to create <video> elements manually — VideoTile owns that via a ref.
-  return document.createElement("video");
-};
+/*
+|--------------------------------------------------------------------------
+| IMPORTANT
+|--------------------------------------------------------------------------
+|
+| ICE candidates can arrive BEFORE setRemoteDescription() finishes.
+|
+| Therefore we temporarily store them here.
+|
+| socket.id -> candidate[]
+|
+*/
 
-// ---------------------------------------------------------------------
-// mediaFunctions.js -> initialise()
-// Identical logic: acquire media, add tracks to the given peer connection.
-// The only change is that button click listeners are gone (no DOM buttons
-// exist anymore) — mic/camera state is instead controlled by toggleMic /
-// toggleCamera below, which act on every stream in localMediaStreams.
-// ---------------------------------------------------------------------
+const pendingCandidates = new Map();
+
+/*
+|--------------------------------------------------------------------------
+| Local media
+|--------------------------------------------------------------------------
+*/
+
 export const initialise = async (peerConnection, user) => {
   const media = await navigator.mediaDevices.getUserMedia({
     video: {
@@ -99,247 +82,762 @@ export const initialise = async (peerConnection, user) => {
 
   for (const track of media.getTracks()) {
     peerConnection.addTrack(track, media);
-    console.log("track sent to ", user);
   }
+
+  console.log("Local tracks added for:", user);
 
   return media;
 };
 
-// ---------------------------------------------------------------------
-// socketFunctions.js -> makeOffer / sendAnswer
-// Unchanged signaling logic.
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Create offer
+|--------------------------------------------------------------------------
+*/
+
 export const makeOffer = async (peerConnection, id) => {
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  socket.emit("offer", offer, id);
+  try {
+    const offer = await peerConnection.createOffer();
+
+    await peerConnection.setLocalDescription(offer);
+
+    console.log("Sending offer to:", map.get(id));
+
+    socket.emit("offer", peerConnection.localDescription, id);
+  } catch (err) {
+    console.error("Error creating offer:", err);
+  }
 };
+
+/*
+|--------------------------------------------------------------------------
+| Create answer
+|--------------------------------------------------------------------------
+*/
 
 export const sendAnswer = async (peerConnection, offer, id) => {
-  await initialise(peerConnection, map.get(id));
-  const answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
-  socket.emit("answer", answer, id);
+  try {
+    /*
+     * At this point the offer has already been set as the
+     * remote description by offerHandler().
+     */
+
+    await initialise(peerConnection, map.get(id));
+
+    const answer = await peerConnection.createAnswer();
+
+    await peerConnection.setLocalDescription(answer);
+
+    console.log("Sending answer to:", map.get(id));
+
+    socket.emit("answer", peerConnection.localDescription, id);
+  } catch (err) {
+    console.error("Error creating answer:", err);
+  }
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/newUserHandler.js
-// Identical peer connection setup. DOM video-tile creation replaced with
-// a "participant-track" emit.
-// ---------------------------------------------------------------------
-const newUserHandler = (id, username) => {
-  map.set(id, username);
-  peerConnectionMap.set(id, new RTCPeerConnection(ICE_SERVERS));
-  const pc = peerConnectionMap.get(id);
+/*
+|--------------------------------------------------------------------------
+| Attach common PeerConnection handlers
+|--------------------------------------------------------------------------
+*/
 
-  pc.addEventListener("icecandidate", (event) => {
-    if (event.candidate) {
-      console.log("new candidate sent to", map.get(id));
-      socket.emit("newCandidate", event.candidate, id);
+const setupPeerConnection = (id, peerConnection) => {
+
+  /*
+   * ICE candidate
+   */
+
+  peerConnection.addEventListener("icecandidate", (event) => {
+
+    if (!event.candidate) {
+      return;
     }
+
+    console.log(
+      "Sending ICE candidate to:",
+      map.get(id)
+    );
+
+    socket.emit(
+      "newCandidate",
+      event.candidate,
+      id
+    );
   });
 
-  pc.addEventListener("connectionstatechange", () => {
-    bus.emit("connection-state", id, pc.connectionState);
-  });
+  /*
+   * ICE state
+   */
 
-  pc.addEventListener("track", ({ streams: [stream] }) => {
-    console.log("media added recieved from", map.get(id));
-    bus.emit("participant-track", id, stream);
-  });
+  peerConnection.addEventListener(
+    "iceconnectionstatechange",
+    () => {
 
-  bus.emit("participant-joined", id, username);
+      console.log(
+        "ICE state with",
+        map.get(id),
+        ":",
+        peerConnection.iceConnectionState
+      );
+
+      bus.emit(
+        "connection-state",
+        id,
+        peerConnection.connectionState
+      );
+    }
+  );
+
+  /*
+   * Overall connection state
+   */
+
+  peerConnection.addEventListener(
+    "connectionstatechange",
+    () => {
+
+      console.log(
+        "Connection state with",
+        map.get(id),
+        ":",
+        peerConnection.connectionState
+      );
+
+      bus.emit(
+        "connection-state",
+        id,
+        peerConnection.connectionState
+      );
+    }
+  );
+
+  /*
+   * Remote media
+   */
+
+  peerConnection.addEventListener(
+    "track",
+    (event) => {
+
+      console.log(
+        "Remote track received from:",
+        map.get(id)
+      );
+
+      const stream = event.streams[0];
+
+      if (!stream) {
+        console.warn(
+          "Track received without MediaStream"
+        );
+        return;
+      }
+
+      bus.emit(
+        "participant-track",
+        id,
+        stream
+      );
+    }
+  );
+
+  /*
+   * Debugging ICE gathering
+   */
+
+  peerConnection.addEventListener(
+    "icegatheringstatechange",
+    () => {
+
+      console.log(
+        "ICE gathering with",
+        map.get(id),
+        ":",
+        peerConnection.iceGatheringState
+      );
+    }
+  );
+
+  /*
+   * Debugging signaling state
+   */
+
+  peerConnection.addEventListener(
+    "signalingstatechange",
+    () => {
+
+      console.log(
+        "Signaling state with",
+        map.get(id),
+        ":",
+        peerConnection.signalingState
+      );
+    }
+  );
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/offerHandler.js — unchanged logic.
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| New user
+|--------------------------------------------------------------------------
+*/
+
+const newUserHandler = (id, username) => {
+
+  console.log(
+    "New user:",
+    username,
+    id
+  );
+
+  map.set(id, username);
+
+  const peerConnection =
+    new RTCPeerConnection(ICE_SERVERS);
+
+  peerConnectionMap.set(
+    id,
+    peerConnection
+  );
+
+  setupPeerConnection(
+    id,
+    peerConnection
+  );
+
+  bus.emit(
+    "participant-joined",
+    id,
+    username
+  );
+};
+
+/*
+|--------------------------------------------------------------------------
+| Offer received
+|--------------------------------------------------------------------------
+*/
+
 const offerHandler = async (offer, id) => {
-  console.log("offer recieved");
-  const currPeerConnection = peerConnectionMap.get(id);
 
-  try {
-    await currPeerConnection.setRemoteDescription(offer);
-    console.log(currPeerConnection.remoteDescription);
-  } catch (err) {
-    console.log("error;", err);
+  console.log(
+    "Offer received from:",
+    map.get(id)
+  );
+
+  const peerConnection =
+    peerConnectionMap.get(id);
+
+  if (!peerConnection) {
+    console.error(
+      "No peer connection exists for:",
+      id
+    );
+
+    return;
   }
 
-  sendAnswer(currPeerConnection, offer, id)
-    .then(() => console.log("answer sent"))
-    .catch((err) => console.log("error-", err));
+  try {
+
+    /*
+     * FIRST:
+     * Set remote description.
+     */
+
+    await peerConnection.setRemoteDescription(
+      new RTCSessionDescription(offer)
+    );
+
+    console.log(
+      "Remote description set for:",
+      map.get(id)
+    );
+
+    /*
+     * THEN:
+     * Add ICE candidates that arrived too early.
+     */
+
+    const queuedCandidates =
+      pendingCandidates.get(id) || [];
+
+    for (const candidate of queuedCandidates) {
+
+      try {
+
+        await peerConnection.addIceCandidate(
+          candidate
+        );
+
+        console.log(
+          "Queued ICE candidate added from:",
+          map.get(id)
+        );
+
+      } catch (err) {
+
+        console.error(
+          "Error adding queued ICE candidate:",
+          err
+        );
+      }
+    }
+
+    pendingCandidates.delete(id);
+
+    /*
+     * Finally create the answer.
+     */
+
+    await sendAnswer(
+      peerConnection,
+      offer,
+      id
+    );
+
+    console.log(
+      "Answer successfully sent to:",
+      map.get(id)
+    );
+
+  } catch (err) {
+
+    console.error(
+      "Error handling offer:",
+      err
+    );
+  }
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/answerHandler.js — unchanged logic.
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Answer received
+|--------------------------------------------------------------------------
+*/
+
 const answerHandler = async (answer, id) => {
-  console.log("answer recieved");
-  const pc = peerConnectionMap.get(id);
 
-  pc.addEventListener("connectionstatechange", () => {
-    console.log("connection:", pc.connectionState);
-  });
+  console.log(
+    "Answer received from:",
+    map.get(id)
+  );
+
+  const peerConnection =
+    peerConnectionMap.get(id);
+
+  if (!peerConnection) {
+    console.error(
+      "No peer connection exists for:",
+      id
+    );
+
+    return;
+  }
 
   try {
-    await pc.setRemoteDescription(answer);
+
+    await peerConnection.setRemoteDescription(
+      new RTCSessionDescription(answer)
+    );
+
+    console.log(
+      "Remote answer set from:",
+      map.get(id)
+    );
+
+    /*
+     * Add candidates that arrived before
+     * the answer.
+     */
+
+    const queuedCandidates =
+      pendingCandidates.get(id) || [];
+
+    for (const candidate of queuedCandidates) {
+
+      try {
+
+        await peerConnection.addIceCandidate(
+          candidate
+        );
+
+        console.log(
+          "Queued ICE candidate added from:",
+          map.get(id)
+        );
+
+      } catch (err) {
+
+        console.error(
+          "Error adding queued ICE candidate:",
+          err
+        );
+      }
+    }
+
+    pendingCandidates.delete(id);
+
   } catch (err) {
-    console.log("error", err);
+
+    console.error(
+      "Error setting remote answer:",
+      err
+    );
   }
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/newCandidate.js — unchanged logic.
-// ---------------------------------------------------------------------
-const newCandidateHandler = async (candidate, id) => {
-  const pc = peerConnectionMap.get(id);
-  await pc.addIceCandidate(candidate);
-  console.log("neew candidate added from", map.get(id));
+/*
+|--------------------------------------------------------------------------
+| ICE candidate received
+|--------------------------------------------------------------------------
+*/
+
+const newCandidateHandler = async (
+  candidate,
+  id
+) => {
+
+  const peerConnection =
+    peerConnectionMap.get(id);
+
+  if (!peerConnection) {
+
+    console.warn(
+      "Received ICE candidate but peer connection doesn't exist:",
+      id
+    );
+
+    return;
+  }
+
+  /*
+   * CRITICAL FIX:
+   *
+   * If remoteDescription isn't set yet,
+   * don't call addIceCandidate().
+   *
+   * Queue it instead.
+   */
+
+  if (!peerConnection.remoteDescription) {
+
+    console.log(
+      "Queueing ICE candidate from:",
+      map.get(id)
+    );
+
+    if (!pendingCandidates.has(id)) {
+      pendingCandidates.set(
+        id,
+        []
+      );
+    }
+
+    pendingCandidates
+      .get(id)
+      .push(candidate);
+
+    return;
+  }
+
+  try {
+
+    await peerConnection.addIceCandidate(
+      candidate
+    );
+
+    console.log(
+      "ICE candidate added from:",
+      map.get(id)
+    );
+
+  } catch (err) {
+
+    console.error(
+      "Error adding ICE candidate:",
+      err
+    );
+  }
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/DisconnectHandler.js
-// Identical cleanup of map/peerConnectionMap. DOM element removal replaced
-// with a "participant-left" emit.
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Disconnect
+|--------------------------------------------------------------------------
+*/
+
 const disconnectHandler = (id) => {
-  console.log("deleting disconnected from map", id);
-  map.delete(id);
+
+  console.log(
+    "User disconnected:",
+    map.get(id)
+  );
+
+  const peerConnection =
+    peerConnectionMap.get(id);
+
+  if (peerConnection) {
+    peerConnection.close();
+  }
+
   peerConnectionMap.delete(id);
-  bus.emit("participant-left", id);
-  console.log("after disconnection", peerConnectionMap);
+  map.delete(id);
+  pendingCandidates.delete(id);
+
+  bus.emit(
+    "participant-left",
+    id
+  );
 };
 
-// ---------------------------------------------------------------------
-// socketHandlers/userInfoHandler.js
-// Identical logic: acquire local preview media, then for every existing
-// room member, create a peer connection, wire it up, initialise media, and
-// make an offer. DOM local-video assignment replaced with "local-preview"
-// emit; mic/camera button wiring removed (handled centrally, see below).
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Existing users when we join
+|--------------------------------------------------------------------------
+*/
+
 const userInfoEventHandler = async (data) => {
+
+  /*
+   * Populate user map.
+   */
+
   for (const [key, val] of data) {
     map.set(key, val);
   }
 
-  const localPreview = await navigator.mediaDevices.getUserMedia({
-    video: {
-      height: 200,
-      width: 200,
-    },
-  });
-  localMediaStreams.push(localPreview);
-  bus.emit("local-preview", localPreview);
+  /*
+   * Local preview.
+   *
+   * This stream is only for our own video.
+   */
 
-  if (map.size > 1) {
-    for (const pair of map) {
-      if (pair[0] !== socket.id) {
-        const peerConnection = new RTCPeerConnection(ICE_SERVERS);
-        peerConnectionMap.set(pair[0], peerConnection);
+  try {
 
-        peerConnection.addEventListener("icecandidate", (event) => {
-          console.log("new candidate sent to", map.get(pair[0]));
-          socket.emit("newCandidate", event.candidate, pair[0]);
-        });
+    const localPreview =
+      await navigator.mediaDevices.getUserMedia({
+        video: {
+          height: 200,
+          width: 200,
+        },
+        audio: true,
+      });
 
-        peerConnection.addEventListener("connectionstatechange", () => {
-          bus.emit("connection-state", pair[0], peerConnection.connectionState);
-        });
+    localMediaStreams.push(
+      localPreview
+    );
 
-        peerConnection.addEventListener("track", ({ streams: [stream] }) => {
-          console.log(stream);
-          console.log(stream.getTracks());
-          bus.emit("participant-track", pair[0], stream);
-        });
+    bus.emit(
+      "local-preview",
+      localPreview
+    );
 
-        bus.emit("participant-joined", pair[0], pair[1]);
+  } catch (err) {
 
-        try {
-          await initialise(peerConnection, map.get(pair[0]));
-        } catch (err) {
-          console.log("error:", err);
-        }
+    console.error(
+      "Could not get local media:",
+      err
+    );
 
-        makeOffer(peerConnection, pair[0])
-          .then(() => console.log("offer Created succesfully"))
-          .catch((err) => console.log("error", err));
-      }
+    return;
+  }
+
+  /*
+   * We create offers to every user
+   * already inside the room.
+   */
+
+  for (const [id, username] of map) {
+
+    if (id === socket.id) {
+      continue;
+    }
+
+    /*
+     * Don't accidentally create a second
+     * PeerConnection.
+     */
+
+    if (peerConnectionMap.has(id)) {
+      continue;
+    }
+
+    console.log(
+      "Creating connection to:",
+      username,
+      id
+    );
+
+    const peerConnection =
+      new RTCPeerConnection(
+        ICE_SERVERS
+      );
+
+    peerConnectionMap.set(
+      id,
+      peerConnection
+    );
+
+    setupPeerConnection(
+      id,
+      peerConnection
+    );
+
+    bus.emit(
+      "participant-joined",
+      id,
+      username
+    );
+
+    try {
+
+      await initialise(
+        peerConnection,
+        username
+      );
+
+      await makeOffer(
+        peerConnection,
+        id
+      );
+
+    } catch (err) {
+
+      console.error(
+        "Error establishing connection with:",
+        username,
+        err
+      );
     }
   }
 };
 
-// ---------------------------------------------------------------------
-// client.js — the join flow + socket.on wiring. Identical event names and
-// payloads. Guarded so React StrictMode's mount/unmount/mount dev cycle
-// cannot register duplicate listeners or spin up duplicate connections.
-// ---------------------------------------------------------------------
-export const joinMeeting = ({ username, room }) => {
-  if (handlersRegistered) return;
+/*
+|--------------------------------------------------------------------------
+| Join meeting
+|--------------------------------------------------------------------------
+*/
+
+export const joinMeeting = ({
+  username,
+  room,
+}) => {
+
+  if (handlersRegistered) {
+    return;
+  }
+
   handlersRegistered = true;
 
-  socket.emit("join", { username, room });
+  /*
+   * Register listeners BEFORE emitting join.
+   */
 
-  socket.on("userInfo", (data) => {
-    userInfoEventHandler(data);
-  });
+  socket.on(
+    "userInfo",
+    userInfoEventHandler
+  );
 
-  socket.on("offer", (offer, id) => {
-    offerHandler(offer, id);
-  });
+  socket.on(
+    "offer",
+    offerHandler
+  );
 
-  socket.on("answer", (answer, id) => {
-    answerHandler(answer, id);
-  });
+  socket.on(
+    "answer",
+    answerHandler
+  );
 
-  socket.on("newUser", (id, username) => {
-    newUserHandler(id, username);
-  });
+  socket.on(
+    "newUser",
+    newUserHandler
+  );
 
-  socket.on("userDisconnected", (id) => {
-    disconnectHandler(id);
-  });
+  socket.on(
+    "userDisconnected",
+    disconnectHandler
+  );
 
-  socket.on("newCandidate", (candidate, id) => {
-    newCandidateHandler(candidate, id);
-  });
+  socket.on(
+    "newCandidate",
+    newCandidateHandler
+  );
+
+  socket.emit(
+    "join",
+    {
+      username,
+      room,
+    }
+  );
 };
+
+/*
+|--------------------------------------------------------------------------
+| Leave meeting
+|--------------------------------------------------------------------------
+*/
 
 export const leaveMeeting = () => {
-  // Preserves the original "leave room" behavior (controls.js just navigated
-  // back to "/"), extended to also tear down this client's own connections
-  // so the tab doesn't keep sending audio/video after leaving.
-  for (const pc of peerConnectionMap.values()) {
-    pc.close();
+
+  for (const peerConnection of peerConnectionMap.values()) {
+    peerConnection.close();
   }
+
   peerConnectionMap.clear();
+  map.clear();
+  pendingCandidates.clear();
+
   for (const stream of localMediaStreams) {
-    stream.getTracks().forEach((track) => track.stop());
+
+    stream
+      .getTracks()
+      .forEach((track) => {
+        track.stop();
+      });
+
   }
+
   localMediaStreams.length = 0;
-  socket.disconnect();
+
+  if (socket.connected) {
+    socket.disconnect();
+  }
+
+  handlersRegistered = false;
 };
 
-// ---------------------------------------------------------------------
-// Mic/camera control. The original app wired independent button listeners
-// per acquired stream (once in userInfoHandler.js, again in every call to
-// initialise()), each toggling only the stream in its own closure. Re-doing
-// that literally in React would mean re-attaching N duplicate handlers to
-// one button on every render, which breaks under React's render model. This
-// preserves the same end result — one control mutes/unmutes every stream
-// this client has sent — driven by a single explicit state value instead.
-// ---------------------------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Mic
+|--------------------------------------------------------------------------
+*/
+
 export const toggleMic = (enabled) => {
-  localMediaStreams.forEach((stream) => {
-    stream.getAudioTracks().forEach((track) => {
+
+  for (const stream of localMediaStreams) {
+
+    for (const track of stream.getAudioTracks()) {
       track.enabled = enabled;
-    });
-  });
+    }
+
+  }
 };
+
+/*
+|--------------------------------------------------------------------------
+| Camera
+|--------------------------------------------------------------------------
+*/
 
 export const toggleCamera = (enabled) => {
-  localMediaStreams.forEach((stream) => {
-    stream.getVideoTracks().forEach((track) => {
+
+  for (const stream of localMediaStreams) {
+
+    for (const track of stream.getVideoTracks()) {
       track.enabled = enabled;
-    });
-  });
+    }
+
+  }
 };
