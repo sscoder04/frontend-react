@@ -718,61 +718,38 @@ const userInfoEventHandler = async (data) => {
 | Join meeting
 |--------------------------------------------------------------------------
 */
-
-export const joinMeeting = ({
-  username,
-  room,
-}) => {
-
-  if (handlersRegistered) {
-    return;
-  }
-
+export const joinMeeting = ({ username, room }) => {
+  if (handlersRegistered) return;
   handlersRegistered = true;
 
-  /*
-   * Register listeners BEFORE emitting join.
-   */
+  // Register listeners BEFORE joining
+  socket.on("userInfo", (data) => {
+    userInfoEventHandler(data);
+  });
 
-  socket.on(
-    "userInfo",
-    userInfoEventHandler
-  );
+  socket.on("offer", (offer, id) => {
+    offerHandler(offer, id);
+  });
 
-  socket.on(
-    "offer",
-    offerHandler
-  );
+  socket.on("answer", (answer, id) => {
+    answerHandler(answer, id);
+  });
 
-  socket.on(
-    "answer",
-    answerHandler
-  );
+  socket.on("newUser", (id, username) => {
+    newUserHandler(id, username);
+  });
 
-  socket.on(
-    "newUser",
-    newUserHandler
-  );
+  socket.on("userDisconnected", (id) => {
+    disconnectHandler(id);
+  });
 
-  socket.on(
-    "userDisconnected",
-    disconnectHandler
-  );
+  socket.on("newCandidate", (candidate, id) => {
+    newCandidateHandler(candidate, id);
+  });
 
-  socket.on(
-    "newCandidate",
-    newCandidateHandler
-  );
-
-  socket.emit(
-    "join",
-    {
-      username,
-      room,
-    }
-  );
+  // Join ONLY after listeners are ready
+  socket.emit("join", { username, room });
 };
-
 /*
 |--------------------------------------------------------------------------
 | Leave meeting
