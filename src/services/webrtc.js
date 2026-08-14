@@ -36,14 +36,40 @@ let handlersRegistered = false;
 // network address). That works by accident on localhost or when both peers
 // are on the same LAN, but fails silently across real networks — neither
 // side ever gets a NAT-traversed path to the other, so no track event ever
-// fires. This is a standard public STUN server list (no TURN — see note in
-// the deploy docs about adding one if you're still seeing connection
-// failures behind restrictive/symmetric NATs). This is additive
-// configuration, not a change to the signaling logic itself.
+// fires. This is additive configuration, not a change to the signaling
+// logic itself.
+//
+// STUN alone (stun.l.google.com) only helps peers discover their own public
+// address — it doesn't help when a direct path still isn't reachable (e.g.
+// symmetric NAT, restrictive corporate firewalls). TURN relays media
+// through a third-party server in that case, at the cost of that server's
+// bandwidth.
+//
+// Defaults to the Open Relay Project's free public TURN server — fine for
+// testing and small/low-traffic use, but it's shared/rate-limited and has
+// no uptime guarantee. For production, set these three env vars to your
+// own TURN provider's credentials (Metered, Twilio, Xirsys, etc.) and they
+// override the public fallback automatically:
+//   VITE_TURN_URL, VITE_TURN_USERNAME, VITE_TURN_CREDENTIAL
+const turnUrl = import.meta.env.VITE_TURN_URL;
+const turnUsername = import.meta.env.VITE_TURN_USERNAME;
+const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
+
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    turnUrl && turnUsername && turnCredential
+      ? { urls: turnUrl, username: turnUsername, credential: turnCredential }
+      : {
+          urls: [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turn:openrelay.metered.ca:443?transport=tcp",
+          ],
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
   ],
 };
 
