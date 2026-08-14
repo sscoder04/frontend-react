@@ -362,6 +362,45 @@ const offerHandler = async (offer, id) => {
 
 /*
 |--------------------------------------------------------------------------
+| Answer received
+|--------------------------------------------------------------------------
+*/
+
+const answerHandler = async (answer, id) => {
+  console.log("answer received from", map.get(id));
+
+  const currPeerConnection = peerConnectionMap.get(id);
+
+  if (!currPeerConnection) {
+    console.error("No peer connection found for", id);
+    return;
+  }
+
+  try {
+    await currPeerConnection.setRemoteDescription(answer);
+
+    console.log("Remote description (answer) set");
+
+    // Add ICE candidates that arrived before the answer
+    const queuedCandidates = pendingCandidates.get(id) || [];
+
+    for (const candidate of queuedCandidates) {
+      try {
+        await currPeerConnection.addIceCandidate(candidate);
+      } catch (err) {
+        console.error("Error adding queued ICE candidate:", err);
+      }
+    }
+
+    pendingCandidates.delete(id);
+
+  } catch (err) {
+    console.error("Error setting remote description (answer):", err);
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
 | ICE candidate received
 |--------------------------------------------------------------------------
 */
