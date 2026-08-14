@@ -320,170 +320,43 @@ const newUserHandler = (id, username) => {
 */
 
 const offerHandler = async (offer, id) => {
+  console.log("offer received from", map.get(id));
 
-  console.log(
-    "Offer received from:",
-    map.get(id)
-  );
+  const currPeerConnection = peerConnectionMap.get(id);
 
-  const peerConnection =
-    peerConnectionMap.get(id);
-
-  if (!peerConnection) {
-    console.error(
-      "No peer connection exists for:",
-      id
-    );
-
+  if (!currPeerConnection) {
+    console.error("No peer connection found for", id);
     return;
   }
 
   try {
+    await currPeerConnection.setRemoteDescription(offer);
 
-    /*
-     * FIRST:
-     * Set remote description.
-     */
+    console.log("Remote description set");
 
-    await peerConnection.setRemoteDescription(
-      new RTCSessionDescription(offer)
-    );
-
-    console.log(
-      "Remote description set for:",
-      map.get(id)
-    );
-
-    /*
-     * THEN:
-     * Add ICE candidates that arrived too early.
-     */
-
-    const queuedCandidates =
-      pendingCandidates.get(id) || [];
+    // Add ICE candidates that arrived before the offer
+    const queuedCandidates = pendingCandidates.get(id) || [];
 
     for (const candidate of queuedCandidates) {
-
       try {
-
-        await peerConnection.addIceCandidate(
-          candidate
-        );
-
-        console.log(
-          "Queued ICE candidate added from:",
-          map.get(id)
-        );
-
+        await currPeerConnection.addIceCandidate(candidate);
       } catch (err) {
-
-        console.error(
-          "Error adding queued ICE candidate:",
-          err
-        );
-      }
-    }
-
-    pendingCandidates.delete(id);
-
-    /*
-     * Finally create the answer.
-     */
-
-    await sendAnswer(
-      peerConnection,
-      offer,
-      id
-    );
-
-    console.log(
-      "Answer successfully sent to:",
-      map.get(id)
-    );
-
-  } catch (err) {
-
-    console.error(
-      "Error handling offer:",
-      err
-    );
-  }
-};
-
-/*
-|--------------------------------------------------------------------------
-| Answer received
-|--------------------------------------------------------------------------
-*/
-
-const answerHandler = async (answer, id) => {
-
-  console.log(
-    "Answer received from:",
-    map.get(id)
-  );
-
-  const peerConnection =
-    peerConnectionMap.get(id);
-
-  if (!peerConnection) {
-    console.error(
-      "No peer connection exists for:",
-      id
-    );
-
-    return;
-  }
-
-  try {
-
-    await peerConnection.setRemoteDescription(
-      new RTCSessionDescription(answer)
-    );
-
-    console.log(
-      "Remote answer set from:",
-      map.get(id)
-    );
-
-    /*
-     * Add candidates that arrived before
-     * the answer.
-     */
-
-    const queuedCandidates =
-      pendingCandidates.get(id) || [];
-
-    for (const candidate of queuedCandidates) {
-
-      try {
-
-        await peerConnection.addIceCandidate(
-          candidate
-        );
-
-        console.log(
-          "Queued ICE candidate added from:",
-          map.get(id)
-        );
-
-      } catch (err) {
-
-        console.error(
-          "Error adding queued ICE candidate:",
-          err
-        );
+        console.error("Error adding queued ICE candidate:", err);
       }
     }
 
     pendingCandidates.delete(id);
 
   } catch (err) {
+    console.error("Error setting remote description:", err);
+    return;
+  }
 
-    console.error(
-      "Error setting remote answer:",
-      err
-    );
+  try {
+    await sendAnswer(currPeerConnection, offer, id);
+    console.log("answer sent");
+  } catch (err) {
+    console.error("Error sending answer:", err);
   }
 };
 
@@ -493,23 +366,30 @@ const answerHandler = async (answer, id) => {
 |--------------------------------------------------------------------------
 */
 
-const newCandidateHandler = async (
-  candidate,
-  id
-) => {
+const newCandidateHandler = async (candidate, id) => {
+  const pc = peerConnectionMap.get(id);
 
-  const peerConnection =
-    peerConnectionMap.get(id);
+  if (!pc || !candidate) return;
 
-  if (!peerConnection) {
+  // Remote description has not arrived yet.
+  if (!pc.remoteDescription) {
+    if (!pendingCandidates.has(id)) {
+      pendingCandidates.set(id, []);
+    }
 
-    console.warn(
-      "Received ICE candidate but peer connection doesn't exist:",
-      id
-    );
+    pendingCandidates.get(id).push(candidate);
 
+    console.log("ICE candidate queued for", map.get(id));
     return;
   }
+
+  try {
+    await pc.addIceCandidate(candidate);
+    console.log("ICE candidate added from", map.get(id));
+  } catch (err) {
+    console.error("Error adding ICE candidate:", err);
+  }
+};
 
   /*
    * CRITICAL FIX:
