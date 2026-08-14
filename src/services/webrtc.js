@@ -391,56 +391,6 @@ const newCandidateHandler = async (candidate, id) => {
   }
 };
 
-  /*
-   * CRITICAL FIX:
-   *
-   * If remoteDescription isn't set yet,
-   * don't call addIceCandidate().
-   *
-   * Queue it instead.
-   */
-
-  if (!peerConnection.remoteDescription) {
-
-    console.log(
-      "Queueing ICE candidate from:",
-      map.get(id)
-    );
-
-    if (!pendingCandidates.has(id)) {
-      pendingCandidates.set(
-        id,
-        []
-      );
-    }
-
-    pendingCandidates
-      .get(id)
-      .push(candidate);
-
-    return;
-  }
-
-  try {
-
-    await peerConnection.addIceCandidate(
-      candidate
-    );
-
-    console.log(
-      "ICE candidate added from:",
-      map.get(id)
-    );
-
-  } catch (err) {
-
-    console.error(
-      "Error adding ICE candidate:",
-      err
-    );
-  }
-};
-
 /*
 |--------------------------------------------------------------------------
 | Disconnect
