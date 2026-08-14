@@ -31,6 +31,22 @@ export const bus = createEmitter();
 
 let handlersRegistered = false;
 
+// Every RTCPeerConnection created below previously had zero configuration,
+// which means ICE could only gather "host" candidates (your machine's local
+// network address). That works by accident on localhost or when both peers
+// are on the same LAN, but fails silently across real networks — neither
+// side ever gets a NAT-traversed path to the other, so no track event ever
+// fires. This is a standard public STUN server list (no TURN — see note in
+// the deploy docs about adding one if you're still seeing connection
+// failures behind restrictive/symmetric NATs). This is additive
+// configuration, not a change to the signaling logic itself.
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+};
+
 export const createVideoElem = () => {
   // Preserved for parity with the original export, though React no longer
   // needs to create <video> elements manually — VideoTile owns that via a ref.
@@ -87,7 +103,7 @@ export const sendAnswer = async (peerConnection, offer, id) => {
 // ---------------------------------------------------------------------
 const newUserHandler = (id, username) => {
   map.set(id, username);
-  peerConnectionMap.set(id, new RTCPeerConnection());
+  peerConnectionMap.set(id, new RTCPeerConnection(ICE_SERVERS));
   const pc = peerConnectionMap.get(id);
 
   pc.addEventListener("icecandidate", (event) => {
@@ -192,7 +208,7 @@ const userInfoEventHandler = async (data) => {
   if (map.size > 1) {
     for (const pair of map) {
       if (pair[0] !== socket.id) {
-        const peerConnection = new RTCPeerConnection();
+        const peerConnection = new RTCPeerConnection(ICE_SERVERS);
         peerConnectionMap.set(pair[0], peerConnection);
 
         peerConnection.addEventListener("icecandidate", (event) => {
